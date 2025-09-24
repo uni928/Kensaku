@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>検索 & ショートカット（IndexedDB）</title>
+<style>
+  :root{
+    --bg:#f7f7f8; --card:#fff; --fg:#222; --muted:#666; --accent:#3b82f6; --danger:#ef4444;
+  }
+  html,body{height:100%}
+  body{margin:0; font-family: system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; background:var(--bg); color:var(--fg);}
+  .container{max-width:900px; margin:0 auto; padding:24px}
+  header{display:flex; align-items:center; gap:12px; justify-content:center; margin-bottom:16px}
+  header h1{font-size:20px; font-weight:700; margin:0}
+  .card{background:var(--card); border-radius:16px; box-shadow:0 4px 16px rgba(0,0,0,.06); padding:16px}
+
+  /* Search */
+  .search{display:flex; gap:8px}
+  .search input[type="text"]{flex:1; padding:12px 14px; font-size:16px; border-radius:12px; border:1px solid #ddd; outline:none}
+  .search button{padding:12px 16px; font-size:15px; border-radius:12px; border:0; background:var(--accent); color:#fff; cursor:pointer}
+  .search button:active{transform:translateY(1px)}
+
+  /* Shortcuts grid */
+  .toolbar{display:flex; align-items:center; gap:8px; justify-content:space-between; margin:16px 0 8px}
+  .toolbar .left, .toolbar .right{display:flex; align-items:center; gap:8px}
+  .muted{color:var(--muted); font-size:12px}
+
+  .grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:10px}
+  .chip{position:relative; padding:12px 14px; background:#f0f2f5; border-radius:14px; cursor:pointer; user-select:none; overflow:hidden; white-space:nowrap; text-overflow:ellipsis}
+  .chip:hover{background:#e9edf2}
+  .chip .host{font-weight:600}
+  .chip .url{display:block; font-size:12px; color:var(--muted)}
+
+  /* Edit/Delete mode decorations */
+  .edit .chip{cursor:grab}
+  .chip.dragging{opacity:.5}
+  .chip .remove{position:absolute; top:6px; right:6px; width:22px; height:22px; border-radius:50%; display:grid; place-items:center; background:var(--danger); color:#fff; font-size:14px; border:0; cursor:pointer}
+  .chip .rename{position:absolute; top:6px; right:34px; width:22px; height:22px; border-radius:50%; display:grid; place-items:center; background:var(--accent); color:#fff; font-size:14px; border:0; cursor:pointer}
+  .chip .handle{position:absolute; left:8px; top:50%; transform:translateY(-50%); opacity:.7; font-size:18px; display:none}
+  .edit .chip{padding-left:28px}
+  .edit .chip .handle{display:block}
+
+  /* Add form */
+  .add{display:flex; gap:8px; margin-top:12px}
+  .add input{flex:1; padding:10px 12px; border-radius:12px; border:1px solid #ddd; font-size:14px}
+  .add button{padding:10px 12px; border-radius:12px; border:0; background:var(--accent); color:#fff; cursor:pointer}
+  .ghost{border:2px dashed #cbd5e1; background:transparent}
+
+  .toast{position:fixed; left:50%; bottom:24px; transform:translateX(-50%); background:#111; color:#fff; padding:10px 14px; border-radius:12px; opacity:0; pointer-events:none; transition:opacity .2s}
+  .toast.show{opacity:1}
+</style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>検索 & ショートカット</h1>
+    </header>
+
+    <!-- Google 検索窓 -->
+    <section class="card">
+      <form id="searchForm" class="search" action="https://www.google.com/search" method="GET" target="_blank">
+        <input id="searchBox" type="text" name="q" placeholder="Google検索..." autocomplete="off" />
+        <button type="submit">検索</button>
+      </form>
+      <div class="add">
+        <input id="addUrl" type="text" placeholder="URL を入力（https://...） / 貼り付けで即追加" />
+        <button id="addBtn" type="button">追加</button>
+      </div>
+      <p class="muted" style="margin:8px 2px 0">ヒント：URLをコピーした状態で開くと自動登録を試みます。長押しで編集モード（削除・並べ替え）。</p>
+    </section>
+
+    <!-- ショートカット一覧 -->
+    <section style="margin-top:16px" class="card">
+      <div class="toolbar">
+        <div class="left">
+          <button id="editToggle" type="button" style="border:0; border-radius:10px; padding:8px 12px; background:#eef2ff; cursor:pointer">編集モード: オフ</button>
+          <span class="muted">ドラッグで並べ替え / × で削除</span>
+        </div>
+        <div class="right">
+          <button id="exportBtn" type="button" style="border:0; border-radius:10px; padding:8px 12px; background:#e5e7eb; cursor:pointer">エクスポート</button>
+          <button id="importBtn" type="button" style="border:0; border-radius:10px; padding:8px 12px; background:#e5e7eb; cursor:pointer">インポート</button>
+        </div>
+      </div>
+      <div id="grid" class="grid" aria-live="polite"></div>
+    </section>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<script>
+// ========================= IndexedDB ラッパー =========================
+const DB_NAME = 'shortcut-db';
+const STORE = 'shortcuts';
+let dbPromise;
+
+function openDB(){
+  if(!('indexedDB' in window)){
+    alert('このブラウザは IndexedDB に対応していません。');
+    return Promise.reject('No IndexedDB');
+  }
+  if(!dbPromise){
+    dbPromise = new Promise((resolve, reject)=>{
+      const req = indexedDB.open(DB_NAME, 1);
+      req.onupgradeneeded = e => {
+        const db = e.target.result;
+        const store = db.createObjectStore(STORE, { keyPath: 'id', autoIncrement: true });
+        store.createIndex('by_order', 'order');
+        store.createIndex('by_url', 'url', { unique: true });
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+  return dbPromise;
+}
+
+async function txStore(mode='readonly'){
+  const db = await openDB();
+  const tx = db.transaction(STORE, mode);
+  const st = tx.objectStore(STORE);
+  return {tx, st};
+}
+
+async function getAll(){
+  const {st} = await txStore();
+  return new Promise((resolve, reject)=>{
+    const idx = st.index('by_order');
+    const items = [];
+    idx.openCursor().onsuccess = e => {
+      const cur = e.target.result;
+      if(cur){ items.push(cur.value); cur.continue(); }
+      else resolve(items);
+    };
+  });
+}
+
+async function fetchTitle(url){
+  try{
+    const res = await fetch(url, {mode:'cors'});
+    const text = await res.text();
+    const match = text.match(/<title>(.*?)<\/title>/i);
+    if(match) return match[1];
+  }catch(err){
+    console.warn('title fetch failed', err);
+  }
+  return null;
+}
+
+async function addShortcut(url){
+  url = normalizeUrl(url);
+  if(!url) throw new Error('invalid url');
+  const all = await getAll();
+  if(all.some(x=>x.url === url)) return null; // duplicate ignore
+  const order = (all.reduce((m,x)=>Math.max(m, x.order||0), 0) || 0) + 1;
+  let title = new URL(url).hostname;
+  const fetchedTitle = await fetchTitle(url);
+  if(fetchedTitle) title = fetchedTitle;
+  const {st, tx} = await txStore('readwrite');
+  const putReq = st.add({ url, title, order });
+  return new Promise((resolve,reject)=>{
+    putReq.onsuccess = () => { tx.oncomplete = ()=> resolve(putReq.result); };
+    putReq.onerror = () => reject(putReq.error);
+  });
+}
+
+async function deleteShortcut(id){
+  const {st, tx} = await txStore('readwrite');
+  const req = st.delete(id);
+  return new Promise((resolve,reject)=>{
+    req.onsuccess = () => { tx.oncomplete = ()=> resolve(); };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function saveOrder(domOrderIds){
+  const {st, tx} = await txStore('readwrite');
+  domOrderIds.forEach((id, i)=> st.put({ id: Number(id), ...(window._cache.get(Number(id))||{}), order:i+1 }));
+  return new Promise((resolve,reject)=>{
+    tx.oncomplete = ()=> resolve();
+    tx.onerror = ()=> reject(tx.error);
+  });
+}
+
+async function renameShortcut(id, newTitle){
+  const {st, tx} = await txStore('readwrite');
+  const current = window._cache.get(Number(id));
+  if(!current) throw new Error('not found');
+  const updated = { ...current, title: newTitle };
+  st.put(updated);
+  return new Promise((resolve,reject)=>{
+    tx.oncomplete = ()=> resolve();
+    tx.onerror = ()=> reject(tx.error);
+  });
+}
+
+// ========================= UI / 動作 =========================
+const grid = document.getElementById('grid');
+const addInput = document.getElementById('addUrl');
+const addBtn   = document.getElementById('addBtn');
+const editToggle = document.getElementById('editToggle');
+const exportBtn = document.getElementById('exportBtn');
+const importBtn = document.getElementById('importBtn');
+const toastEl = document.getElementById('toast');
+let editMode = false;
+let longPressTimer = null;
+window._cache = new Map(); // id -> record
+
+function showToast(msg){
+  toastEl.textContent = msg;
+  toastEl.classList.add('show');
+  setTimeout(()=> toastEl.classList.remove('show'), 1600);
+}
+
+function normalizeUrl(v){
+  if(!v) return '';
+  v = v.trim();
+  if(!/^https?:\/\//i.test(v)) v = 'https://' + v;
+  try{ new URL(v); return v; }catch{ return ''; }
+}
+
+async function render(){
+  const items = await getAll();
+  grid.innerHTML = '';
+  window._cache.clear();
+  for(const it of items){ window._cache.set(it.id, it); }
+  grid.parentElement.classList.toggle('edit', editMode);
+  editToggle.textContent = `編集モード: ${editMode? 'オン':'オフ'}`;
+
+  items.forEach(it=>{
+    const div = document.createElement('div');
+    div.className = 'chip';
+    div.draggable = editMode;
+    div.dataset.id = it.id;
+    div.innerHTML = `
+      <span class="handle">≡</span>
+      <span class="host" title="ダブルクリックで名称変更">${it.title}</span>
+      <span class="url">${it.url}</span>
+    `;
+
+    // 通常クリック: 開く
+    div.addEventListener('click', e=>{
+      if(editMode) return; // 編集中は開かない
+      window.open(it.url, '_blank');
+    });
+
+    // タイトルのダブルクリックで名称変更
+    div.querySelector('.host').addEventListener('dblclick', async (e)=>{
+      e.stopPropagation();
+      const current = window._cache.get(Number(it.id));
+      const name = prompt('タイトルを入力', current?.title || '');
+      if(name && name.trim()){
+        await renameShortcut(it.id, name.trim());
+        await render();
+        showToast('タイトルを更新しました');
+      }
+    });
+
+    // 長押しで編集モード切替（モバイル向け）
+    div.addEventListener('touchstart', ()=>{ longPressTimer = setTimeout(()=> toggleEdit(true), 500); }, {passive:true});
+    div.addEventListener('touchend', ()=>{ clearTimeout(longPressTimer); }, {passive:true});
+
+    if(editMode){
+      // ✎ 変更ボタン
+      const ren = document.createElement('button');
+      ren.className = 'rename'; ren.textContent = '✎'; ren.title = 'タイトルを変更';
+      ren.addEventListener('click', async (e)=>{
+        e.stopPropagation();
+        const current = window._cache.get(Number(it.id));
+        const name = prompt('タイトルを入力', current?.title || '');
+        if(name && name.trim()){
+          await renameShortcut(it.id, name.trim());
+          await render();
+          showToast('タイトルを更新しました');
+        }
+      });
+      div.appendChild(ren);
+
+      // × 削除ボタン
+      const rm = document.createElement('button');
+      rm.className = 'remove'; rm.textContent = '×'; rm.title = '削除';
+      rm.addEventListener('click', async (e)=>{ e.stopPropagation(); await deleteShortcut(it.id); await render(); });
+      div.appendChild(rm);
+
+      // DnD 並べ替え
+      div.addEventListener('dragstart', e=>{ div.classList.add('dragging'); e.dataTransfer.effectAllowed='move'; });
+      div.addEventListener('dragend', async e=>{
+        div.classList.remove('dragging');
+        const orderIds = Array.from(grid.children).map(el=> el.dataset.id);
+        await saveOrder(orderIds);
+        showToast('順序を保存しました');
+      });
+      div.addEventListener('dragover', e=>{
+        e.preventDefault();
+        const dragging = grid.querySelector('.dragging');
+        if(!dragging || dragging===div) return;
+        const rect = div.getBoundingClientRect();
+        const before = (e.clientY - rect.top) < rect.height / 2;
+        grid.insertBefore(dragging, before ? div : div.nextSibling);
+      });
+    }
+
+    grid.appendChild(div);
+  });
+}
+
+function toggleEdit(force){
+  editMode = (typeof force === 'boolean') ? force : !editMode;
+  render();
+}
+
+editToggle.addEventListener('click', ()=> toggleEdit());
+
+addBtn.addEventListener('click', async ()=>{
+  const url = addInput.value;
+  const added = await safeAdd(url);
+  if(added){ addInput.value=''; await render(); showToast('ショートカットを追加しました'); }
+});
+
+addInput.addEventListener('keydown', async (e)=>{
+  if(e.key==='Enter'){
+    const added = await safeAdd(addInput.value);
+    if(added){ addInput.value=''; await render(); showToast('ショートカットを追加しました'); }
+  }
+});
+
+addInput.addEventListener('paste', async (e)=>{
+  const text = (e.clipboardData || window.clipboardData).getData('text');
+  if(/^https?:\/\//i.test(text)){
+    e.preventDefault();
+    const added = await safeAdd(text);
+    if(added){ addInput.value=''; await render(); showToast('貼り付けから追加しました'); }
+  }
+});
+
+async function safeAdd(val){
+  const url = normalizeUrl(val);
+  if(!url){ showToast('URLが正しくありません'); return false; }
+  try{ await addShortcut(url); return true; }
+  catch(err){
+    if(String(err).includes('ConstraintError')){ showToast('すでに登録されています'); return false; }
+    console.error(err); showToast('追加に失敗しました'); return false;
+  }
+}
+
+// エクスポート / インポート（JSON）
+exportBtn.addEventListener('click', async ()=>{
+  const data = await getAll();
+  const blob = new Blob([JSON.stringify(data,null,2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'shortcuts.json'; a.click();
+  URL.revokeObjectURL(url);
+});
+
+importBtn.addEventListener('click', async ()=>{
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = 'application/json';
+  inp.onchange = async ()=>{
+    const file = inp.files[0]; if(!file) return;
+    const text = await file.text();
+    let arr = [];
+    try{ arr = JSON.parse(text); }catch{ return alert('JSONの読み込みに失敗しました'); }
+    for(const it of arr){
+      if(it && it.url){ await addShortcut(it.url).catch(()=>{}); }
+    }
+    await render(); showToast('インポート完了');
+  };
+  inp.click();
+});
+
+// 初期化
+(async function init(){
+  await openDB();
+  await render();
+})();
+</script>
+</body>
+</html>
