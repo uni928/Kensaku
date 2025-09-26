@@ -28,6 +28,7 @@
 
   .grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:10px}
   .chip{position:relative; padding:12px 14px; background:#f0f2f5; border-radius:14px; cursor:pointer; user-select:none; overflow:hidden; white-space:nowrap; text-overflow:ellipsis}
+  .edit .chip{ touch-action: none; }
   .chip:hover{background:#e9edf2}
   .chip .host{font-weight:600}
   .chip .url{display:block; font-size:12px; color:var(--muted)}
@@ -46,7 +47,7 @@
   .add input{flex:1; padding:10px 12px; border-radius:12px; border:1px solid #ddd; font-size:14px}
   .add button{padding:10px 12px; border-radius:12px; border:0; background:var(--accent); color:#fff; cursor:pointer}
   .ghost{border:2px dashed #cbd5e1; background:transparent}
-
+  .placeholder{border:2px dashed #cbd5e1; background:transparent; border-radius:14px; height:48px}
   .toast{position:fixed; left:50%; bottom:24px; transform:translateX(-50%); background:#111; color:#fff; padding:10px 14px; border-radius:12px; opacity:0; pointer-events:none; transition:opacity .2s}
   .toast.show{opacity:1}
 </style>
@@ -204,6 +205,12 @@ const toastEl = document.getElementById('toast');
 let editMode = false;
 let longPressTimer = null;
 window._cache = new Map(); // id -> record
+let draggingEl = null;       // 実際に動かす“影”要素
+let draggingDataId = null;   // 対象アイテムの id
+let placeholder = null;      // 差し込み位置を示すプレースホルダー
+let startY = 0;              // 開始Y
+let currentY = 0;            // 現在Y
+const isTouchEnv = () => matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window;
 
 function showToast(msg){
   toastEl.textContent = msg;
@@ -281,26 +288,104 @@ async function render(){
       rm.addEventListener('click', async (e)=>{ e.stopPropagation(); await deleteShortcut(it.id); await render(); });
       div.appendChild(rm);
 
-      // DnD 並べ替え
-      div.addEventListener('dragstart', e=>{ div.classList.add('dragging'); e.dataTransfer.effectAllowed='move'; });
-      div.addEventListener('dragend', async e=>{
-        div.classList.remove('dragging');
-        const orderIds = Array.from(grid.children).map(el=> el.dataset.id);
-        await saveOrder(orderIds);
-        showToast('順序を保存しました');
-      });
-      div.addEventListener('dragover', e=>{
-        e.preventDefault();
-        const dragging = grid.querySelector('.dragging');
-        if(!dragging || dragging===div) return;
-        const rect = div.getBoundingClientRect();
-        const before = (e.clientY - rect.top) < rect.height / 2;
-        grid.insertBefore(dragging, before ? div : div.nextSibling);
-      });
+      // --- デスクトップ: 既存のHTML5 DnD ---
+      if(!isTouchEnv()){
+        div.addEventListener('dragstart', e=>{ div.classList.add('dragging'); e.dataTransfer.effectAllowed='move'; });
+        div.addEventListener('dragend', async e=>{
+          div.classList.remove('dragging');
+          const orderIds = Array.from(grid.children).map(el=> el.dataset.id);
+          await saveOrder(orderIds);
+          showToast('順序を保存しました');
+        });
+        div.addEventListener('dragover', e=>{
+          e.preventDefault();
+          const dragging = grid.querySelector('.dragging');
+          if(!dragging || dragging===div) return;
+          const rect = div.getBoundingClientRect();
+          const before = (e.clientY - rect.top) < rect.height / 2;
+          grid.insertBefore(dragging, before ? div : div.nextSibling);
+        });
+      } else {
+        // --- モバイル: Pointer/Touch ベース ---
+        div.addEventListener('pointerdown', (e)=>{
+          // 右上ボタン等のクリックは無視
+          if(e.target.closest('.remove, .rename')) return;
+          draggingDataId = div.dataset.id;
+          startY = e.clientY;
+          currentY = startY;
+
+          // プレースホルダ作成
+          placeholder = document.createElement('div');
+          placeholder.className = 'placeholder';
+          placeholder.style.height = `${div.offsetHeight}px`;
+          grid.insertBefore(placeholder, div.nextSibling);
+
+          // “影”要素の作成（元の要素はそのまま位置に残す）
+          draggingEl = div.cloneNode(true);
+          draggingEl.classList.add('dragging');
+          draggingEl.style.position = 'fixed';
+          draggingEl.style.left = `${div.getBoundingClientRect().left}px`;
+          draggingEl.style.width = `${div.offsetWidth}px`;
+          draggingEl.style.top = `${div.getBoundingClientRect().top}px`;
+          draggingEl.style.zIndex = '999';
+          draggingEl.style.pointerEvents = 'none';
+          draggingEl.style.opacity = '0.8';
+          document.body.appendChild(draggingEl);
+
+          // 元の要素は半透明に
+          div.style.opacity = '0.3';
+
+          // 移動/終了ハンドラ
+          window.addEventListener('pointermove', onPointerMove, {passive:false});
+          window.addEventListener('pointerup', onPointerUp, {once:true});
+        });
+      }
     }
 
     grid.appendChild(div);
   });
+}
+
+function onPointerMove(e){
+  if(!draggingEl || !placeholder) return;
+  e.preventDefault();
+  currentY = e.clientY;
+  const dy = currentY - startY;
+  draggingEl.style.transform = `translateY(${dy}px)`;
+
+  // 指の位置の下にある chip を検出して placeholder を差し替える
+  const el = document.elementFromPoint(e.clientX, e.clientY);
+  const targetChip = el && (el.closest('.chip'));
+  if(targetChip && targetChip.parentElement === grid && targetChip !== placeholder){
+    const rect = targetChip.getBoundingClientRect();
+    const before = (e.clientY - rect.top) < rect.height / 2;
+    grid.insertBefore(placeholder, before ? targetChip : targetChip.nextSibling);
+  }
+}
+
+async function onPointerUp(e){
+  // DOMを最終配置にして順序保存
+  if(draggingEl){
+    draggingEl.remove();
+    draggingEl = null;
+  }
+  const orig = grid.querySelector(`.chip[data-id="${draggingDataId}"]`);
+  if(orig){
+    orig.style.opacity = '';
+    if(placeholder){
+      grid.insertBefore(orig, placeholder);
+    }
+  }
+  if(placeholder){
+    placeholder.remove();
+    placeholder = null;
+  }
+  // 保存
+  const orderIds = Array.from(grid.children).map(el=> el.dataset.id);
+  await saveOrder(orderIds);
+  showToast('順序を保存しました');
+  draggingDataId = null;
+  window.removeEventListener('pointermove', onPointerMove);
 }
 
 function toggleEdit(force){
@@ -376,4 +461,3 @@ importBtn.addEventListener('click', async ()=>{
 </script>
 </body>
 </html>
-
