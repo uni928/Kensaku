@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>検索＋ショートカット</title>
+<title>New Tab 風 検索＋ショートカット</title>
 <style>
   :root{
     --bg:#f7f5fb; --fg:#241f31; --muted:#6b7280; --accent:#7c3aed; --card:#ffffff;
@@ -27,6 +27,8 @@
   .tile .cap{max-width:90px; font-size:13px; color:var(--fg); text-align:center; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
 
   .edit .tile .dot{cursor:grab}
+  /* モバイルでのドラッグ操作をしやすくする */
+  .edit .tile, .edit .tile .dot{ touch-action: none; }
   .btnmini{position:absolute; top:-6px; right:14px; display:flex; gap:6px}
   .btnmini button{width:24px; height:24px; border-radius:50%; border:0; color:#fff; cursor:pointer}
   .btnmini .rename{background:var(--accent)}
@@ -58,10 +60,7 @@
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M21 21l-4.3-4.3" stroke="#9aa0a6" stroke-width="2" stroke-linecap="round"/><circle cx="11" cy="11" r="7" stroke="#9aa0a6" stroke-width="2"/></svg>
         <input id="q" name="q" type="text" placeholder="Google で検索または URL を入力" autocomplete="off" />
         <button type="submit">検索</button>
-      </form>
-
-      <div class="toolbar"><button id="editToggle" type="button">編集モード: オフ</button></div>
-      <div class="grid" id="grid" aria-live="polite"></div>
+      </form>      <div class="grid" id="grid" aria-live="polite"></div>
     </div>
   </div>
 
@@ -90,24 +89,130 @@ function faviconUrl(url){try{const u=new URL(url);return `https://www.google.com
 async function addShortcut(url,title){url=normUrl(url);if(!url)throw new Error('invalid');const all=await getAll();if(all.some(x=>x.url===url))return null;const order=(all.reduce((m,x)=>Math.max(m,x.order||0),0)||0)+1;let t=title&&title.trim()?title.trim():hostTitle(url);const{st,tx}=await txStore('readwrite');st.add({url,title:t,order});return new Promise(r=>tx.oncomplete=()=>r(true));}
 async function renameShortcut(id,title){const{st,tx}=await txStore('readwrite');const cur=window._cache.get(Number(id));if(!cur)return;st.put({...cur,title});return new Promise(r=>tx.oncomplete=()=>r(true));}
 async function removeShortcut(id){const{st,tx}=await txStore('readwrite');st.delete(Number(id));return new Promise(r=>tx.oncomplete=()=>r(true));}
-async function saveOrder(ids){const{st,tx}=await txStore('readwrite');ids.forEach((id,i)=>st.put({...window._cache.get(Number(id)),order:i+1}));return new Promise(r=>tx.oncomplete=()=>r(true));}
+async function saveOrder(ids){
+  const{st,tx}=await txStore('readwrite');
+  ids.forEach((id,i)=>{
+    const nid = Number(id);
+    const cur = window._cache?.get(nid) || { id: nid };
+    st.put({ ...cur, id: nid, order: i+1 });
+  });
+  return new Promise(r=>tx.oncomplete=()=>r(true));
+}
 
-const grid=document.getElementById('grid');const editToggle=document.getElementById('editToggle');const modalWrap=document.getElementById('modalWrap');const nameInput=document.getElementById('nameInput');const urlInput=document.getElementById('urlInput');const okBtn=document.getElementById('okBtn');const cancelBtn=document.getElementById('cancelBtn');const toastEl=document.getElementById('toast');let editMode=false;let editingId=null;window._cache=new Map();
-function toast(m){toastEl.textContent=m;toastEl.classList.add('show');setTimeout(()=>toastEl.classList.remove('show'),1400);}
+const grid=document.getElementById('grid');
+const modalWrap=document.getElementById('modalWrap');
+const nameInput=document.getElementById('nameInput');
+const urlInput=document.getElementById('urlInput');
+const okBtn=document.getElementById('okBtn');
+const cancelBtn=document.getElementById('cancelBtn');
+const toastEl=document.getElementById('toast');
+
+// グローバル変数をブロックスコープ外で宣言（どの関数からも参照可能に）
+window.editMode = false;
+window.editingId = null;
+window.editTimer = null;
+if (!window._cache) window._cache = new Map();
+
+// 並べ替えドラッグ用変数
+let draggingGhost=null, draggingId=null, dragPlaceholder=null, dragStartY=0, draggingNode=null;
+// グローバルキャッシュを安全に初期化
+if(!window._cache) window._cache = new Map();
+function toast(m){toastEl.textContent=m;toastEl.classList.add('show');setTimeout(()=>toastEl.classList.remove('show'),1200);} 
+function enterEditMode(){ if(editMode) return; editMode=true; render(); toast('編集モード'); resetEditTimer(); }
+function exitEditMode(){ if(!editMode) return; editMode=false; clearTimeout(editTimer); render(); toast('編集モード終了'); }
+function resetEditTimer(){ clearTimeout(editTimer); editTimer=setTimeout(()=> exitEditMode(), 8000); }
 function openModal(t,u){document.getElementById('modalTitle').textContent=editingId?'ショートカットを編集':'ショートカットを追加';modalWrap.style.display='grid';nameInput.value=t||'';urlInput.value=u||'';setTimeout(()=>nameInput.focus(),50);}
 function closeModal(){modalWrap.style.display='none';editingId=null;}
 
-async function render(){const items=await getAll();window._cache.clear();items.forEach(x=>window._cache.set(x.id,x));editToggle.textContent=`編集モード: ${editMode?'オン':'オフ'}`;document.body.classList.toggle('edit',editMode);grid.innerHTML='';const add=document.createElement('div');add.className='tile add';add.innerHTML='<div class="dot">+</div><div class="cap">ショートカット</div>';add.addEventListener('click',()=>{editingId=null;openModal('','');});grid.appendChild(add);
+// 並べ替え：移動/終了ハンドラ
+function onDragMove(e){
+  if(!draggingGhost) return;
+  e.preventDefault();
+  const dy = e.clientY - dragStartY;
+  draggingGhost.style.transform = `translateY(${dy}px)`;
+  const el = document.elementFromPoint(e.clientX, e.clientY);
+  const tile = el && el.closest('.tile');
+  // ゴースト自身やプレースホルダは無視
+  if(tile === draggingGhost || tile === dragPlaceholder) return;
+  if(tile && tile.parentElement===grid && tile!==dragPlaceholder){
+    const rect = tile.getBoundingClientRect();
+    const before = (e.clientY - rect.top) < rect.height/2;
+    grid.insertBefore(dragPlaceholder, before ? tile : tile.nextSibling);
+  }
+}
+async function onDragUp(){
+  if(draggingGhost){ draggingGhost.remove(); draggingGhost=null; }
+  // 取り外していた元ノードをプレースホルダ位置へ戻す
+  if(draggingNode && dragPlaceholder){
+    grid.insertBefore(draggingNode, dragPlaceholder);
+    draggingNode.style.opacity = '';
+  }
+  if(dragPlaceholder){ dragPlaceholder.remove(); dragPlaceholder=null; }
+  const ids = [...grid.querySelectorAll('.tile')].slice(1).map(n=>n.dataset.id); // 先頭の「＋」は除外
+  await saveOrder(ids);
+  toast('順序を保存しました');
+  draggingId=null; draggingNode=null;
+  window.removeEventListener('pointermove', onDragMove);
+}
+
+async function render(){const items=await getAll();if(!window._cache) window._cache = new Map();
+  window._cache.clear();
+  items.forEach(x=>window._cache.set(x.id,x));document.body.classList.toggle('edit',editMode);grid.innerHTML='';const add=document.createElement('div');add.className='tile add';add.innerHTML='<div class="dot">+</div><div class="cap">ショートカット</div>';add.addEventListener('click',()=>{editingId=null;openModal('','');});grid.appendChild(add);
+// ＋は長押し対象外（no-op）
+add.addEventListener('pointerdown', ()=>{});
 items.forEach(it=>{const t=document.createElement('div');t.className='tile';t.dataset.id=it.id;const favi=faviconUrl(it.url);const icon=favi?`<img src="${favi}" alt="icon" onerror="this.style.display='none'">`:(it.title||hostTitle(it.url)).charAt(0).toUpperCase();t.innerHTML=`<div class="dot" title="${it.title}">${icon}</div><div class="cap">${it.title}</div>`;
-const dot=t.querySelector('.dot');dot.addEventListener('click',()=>{if(editMode)return;location.href=it.url;});
-if(editMode){const btn=document.createElement('div');btn.className='btnmini';const rn=document.createElement('button');rn.className='rename';rn.textContent='✎';rn.onclick=()=>{editingId=it.id;openModal(it.title,it.url);};const rm=document.createElement('button');rm.className='remove';rm.textContent='×';rm.onclick=async()=>{await removeShortcut(it.id);await render();};btn.append(rn,rm);t.appendChild(btn);}
+const dot=t.querySelector('.dot');
+// 通常クリックで開く
+dot.addEventListener('click',()=>{if(editMode)return;location.href=it.url;});
+// 長押しで編集モード（＋以外）
+let lpTimer=null;
+t.addEventListener('pointerdown',()=>{ if(editMode) return; lpTimer=setTimeout(()=> enterEditMode(), 500); });
+t.addEventListener('pointerup',()=>{ clearTimeout(lpTimer); });
+t.addEventListener('pointerleave',()=>{ clearTimeout(lpTimer); });
+t.addEventListener('contextmenu',(e)=>{ e.preventDefault(); enterEditMode(); });
+if(editMode){
+  const btn=document.createElement('div');btn.className='btnmini';
+  const rn=document.createElement('button');rn.className='rename';rn.textContent='✎';rn.onclick=()=>{editingId=it.id;openModal(it.title,it.url);};
+  const rm=document.createElement('button');rm.className='remove';rm.textContent='×';rm.onclick=async()=>{await removeShortcut(it.id);await render();};
+  btn.append(rn,rm);t.appendChild(btn);
+
+  // ドラッグで入れ替え（編集ボタン上は無効）
+  t.addEventListener('pointerdown',(e)=>{
+    if(e.target.closest('.btnmini')) return;
+    draggingId = t.dataset.id;
+    dragStartY = e.clientY;
+    // プレースホルダ（元サイズに合わせる）
+    dragPlaceholder = document.createElement('div');
+    dragPlaceholder.className = 'placeholder';
+    dragPlaceholder.style.width  = `${t.offsetWidth}px`;
+    dragPlaceholder.style.height = `${t.offsetHeight}px`;
+    // 元の位置にプレースホルダを挿入し、元ノードは一時的にDOMから外す
+    grid.insertBefore(dragPlaceholder, t);
+    draggingNode = t; // 後で戻すため保持
+    grid.removeChild(t);
+    // 影要素（クローン）を画面上に表示して追従
+    const r = dragPlaceholder.getBoundingClientRect();
+    draggingGhost = draggingNode.cloneNode(true);
+    draggingGhost.classList.add('ghost');
+    Object.assign(draggingGhost.style,{
+      position:'fixed', left:r.left+'px', top:r.top+'px',
+      width:r.width+'px', zIndex:999, pointerEvents:'none'
+    });
+    document.body.appendChild(draggingGhost);
+    window.addEventListener('pointermove', onDragMove, {passive:false});
+    window.addEventListener('pointerup', onDragUp, {once:true});
+  });
+}
 grid.appendChild(t);});}
 
-editToggle.onclick=()=>{editMode=!editMode;render();};
+
 okBtn.onclick=async()=>{const name=nameInput.value.trim();const url=urlInput.value.trim();if(!url){urlInput.focus();return;}if(editingId){await renameShortcut(editingId,name||hostTitle(url));toast('タイトルを更新しました');}else{try{await addShortcut(url,name);toast('追加しました');}catch{toast('追加に失敗しました');}}closeModal();await render();};
 cancelBtn.onclick=()=>closeModal();modalWrap.onclick=e=>{if(e.target===modalWrap)closeModal();};
+// 背景クリック/ESCで編集モードを終了 & 操作で延長
+document.addEventListener('click',(e)=>{ if(!editMode) return; if(!e.target.closest('.tile') && !e.target.closest('.modalWrap')) exitEditMode(); });
+document.addEventListener('keydown',(e)=>{ if(e.key==='Escape') exitEditMode(); });
+document.addEventListener('pointerdown',()=>{ if(editMode) resetEditTimer(); });
 (async()=>{await openDB();await render();})();
 </script>
 </body>
 </html>
-
