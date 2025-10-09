@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>検索＋ショートカット</title>
+<title>New Tab 風 検索＋ショートカット</title>
 <style>
   :root{
     --bg:#f7f5fb; --fg:#241f31; --muted:#6b7280; --accent:#7c3aed; --card:#ffffff;
@@ -213,7 +213,38 @@ document.addEventListener('click',(e)=>{ if(!editMode) return; if(!e.target.clos
 document.addEventListener('keydown',(e)=>{ if(e.key==='Escape') exitEditMode(); });
 document.addEventListener('pointerdown',()=>{ if(editMode) resetEditTimer(); });
 (async()=>{await openDB();await render();})();
+
+// ========================= 検索欄: URL優先でアクセス, 失敗時は検索 =========================
+const searchForm = document.getElementById('searchForm');
+const qInput = document.getElementById('q');
+function isLikelyUrl(v){
+  if(!v) return false;
+  v = v.trim();
+  if(/^https?:\/\//i.test(v)) return true;
+  // ドメイン or IP っぽい（example.com / sub.example.co.jp / 192.168.1.1 / localhost）
+  return /^([a-z0-9-]+\.)+[a-z]{2,}(?:[\/?#].*)?$/i.test(v) || /^(\d{1,3}\.){3}\d{1,3}(?:[:\/?#].*)?$/.test(v) || /^localhost(?:[:\/?#].*)?$/i.test(v);
+}
+searchForm.addEventListener('submit', async (e)=>{
+  e.preventDefault();
+  const raw = qInput.value.trim();
+  if(!raw) return;
+  // URL っぽければアクセスに挑戦、ダメなら検索
+  if(isLikelyUrl(raw)){
+    const target = normUrl(raw);
+    try{
+      // no-cors で到達性だけ確認（3秒タイムアウト）
+     const ctrl = new AbortController();
+      const timer = setTimeout(()=> ctrl.abort(), 3000);
+      await fetch(target, { mode:'no-cors', method:'GET', signal: ctrl.signal });
+     clearTimeout(timer);
+      location.href = target;
+    }catch{
+      location.href = `https://www.google.com/search?q=${encodeURIComponent(raw)}`;
+    }
+  }else{
+    location.href = `https://www.google.com/search?q=${encodeURIComponent(raw)}`;
+  }
+});
 </script>
 </body>
 </html>
-
