@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Minimal Search</title>
+<title>検索</title>
 <style>
   body {
     margin: 0;
@@ -80,7 +80,7 @@
     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2">
       <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-4.3-4.3M11 18a7 7 0 100-14 7 7 0 000 14z"/>
     </svg>
-    <input id="q" type="text" placeholder="Google で検索または URL を入力" autocomplete="off">
+    <input id="q" type="text" placeholder="" autocomplete="off">
     <button type="submit">検索</button>
   </form>
 
@@ -124,3 +124,4 @@ function normUrl(v){if(!v)return'';v=v.trim();if(!/^https?:\/\//i.test(v))v='htt
 </script>
 </body>
 </html>
+
