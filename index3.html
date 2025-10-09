@@ -121,7 +121,10 @@ searchForm.addEventListener('submit', async (e)=>{
 
 function normUrl(v){if(!v)return'';v=v.trim();if(!/^https?:\/\//i.test(v))v='https://'+v;try{new URL(v);return v;}catch{return''}}
 
+window.addEventListener('load', () => qInput.focus());
+  
 </script>
 </body>
 </html>
+
 
