@@ -245,9 +245,13 @@ searchForm.addEventListener('submit', async (e)=>{
     location.href = `https://www.google.com/search?q=${encodeURIComponent(raw)}`;
   }
 });
+
+window.addEventListener('load', () => qInput.focus());
+  
 </script>
 </body>
 </html>
+
 
 
 
