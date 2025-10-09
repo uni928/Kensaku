@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Minimal Search</title>
+<style>
+  body {
+    margin: 0;
+    height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background: #fafaff; /* 柔らかな明るいトーン */
+    font-family: "Segoe UI", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+    color: #2b2b2b;
+  }
+
+  .search-box {
+    display: flex;
+    align-items: center;
+    background: #ffffff;
+    border-radius: 999px;
+    box-shadow: 0 6px 30px rgba(0,0,0,0.06);
+    padding: 12px 20px;
+    width: min(640px, 90vw);
+    transition: box-shadow .25s ease;
+  }
+
+  .search-box:hover {
+    box-shadow: 0 8px 36px rgba(0,0,0,0.08);
+  }
+
+  .search-box svg {
+    flex-shrink: 0;
+    width: 22px;
+    height: 22px;
+    stroke: #b5b5b5;
+  }
+
+  .search-box input {
+    flex: 1;
+    border: none;
+    outline: none;
+    font-size: 17px;
+    margin-left: 10px;
+    color: #333;
+    background: transparent;
+  }
+
+  .search-box button {
+    border: none;
+    outline: none;
+    background: #eef2ff;
+    color: #3741a0;
+    font-size: 15px;
+    padding: 10px 18px;
+    border-radius: 999px;
+    margin-left: 10px;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(55,65,160,0.2);
+    transition: all 0.2s ease;
+  }
+
+  .search-box button:hover {
+    background: #e1e6ff;
+    transform: translateY(-1px);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    body { background: #1a1a1a; color: #eee; }
+    .search-box { background: #222; box-shadow: 0 6px 30px rgba(0,0,0,0.5); }
+    .search-box input { color: #ddd; }
+    .search-box button { background: #333; color: #eee; box-shadow: none; }
+  }
+</style>
+</head>
+<body>
+  <form class="search-box" id="searchForm">
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-4.3-4.3M11 18a7 7 0 100-14 7 7 0 000 14z"/>
+    </svg>
+    <input id="q" type="text" placeholder="Google で検索または URL を入力" autocomplete="off">
+    <button type="submit">検索</button>
+  </form>
+
+<script>
+// ========================= 検索欄: URL優先でアクセス, 失敗時は検索 =========================
+const searchForm = document.getElementById('searchForm');
+const qInput = document.getElementById('q');
+function isLikelyUrl(v){
+  if(!v) return false;
+  v = v.trim();
+  if(/^https?:\/\//i.test(v)) return true;
+  // ドメイン or IP っぽい（example.com / sub.example.co.jp / 192.168.1.1 / localhost）
+  return /^([a-z0-9-]+\.)+[a-z]{2,}(?:[\/?#].*)?$/i.test(v)
+      || /^(\d{1,3}\.){3}\d{1,3}(?:[:\/?#].*)?$/.test(v)
+      || /^localhost(?:[:\/?#].*)?$/i.test(v);
+}
+searchForm.addEventListener('submit', async (e)=>{
+  e.preventDefault();
+  const raw = qInput.value.trim();
+  if(!raw) return;
+  // URL っぽければアクセスに挑戦、ダメなら検索
+  if(isLikelyUrl(raw)){
+    const target = normUrl(raw);
+    try{
+      // no-cors で到達性だけ確認（3秒タイムアウト）
+      const ctrl = new AbortController();
+      const timer = setTimeout(()=> ctrl.abort(), 3000);
+      await fetch(target, { mode:'no-cors', method:'GET', signal: ctrl.signal });
+      clearTimeout(timer);
+      location.href = target;
+    }catch{
+      location.href = `https://www.google.com/search?q=${encodeURIComponent(raw)}`;
+    }
+  }else{
+    location.href = `https://www.google.com/search?q=${encodeURIComponent(raw)}`;
+  }
+});
+
+function normUrl(v){if(!v)return'';v=v.trim();if(!/^https?:\/\//i.test(v))v='https://'+v;try{new URL(v);return v;}catch{return''}}
+
+</script>
+</body>
+</html>
